@@ -1,12 +1,12 @@
 import os
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from database import db, create_document, get_documents
 
-app = FastAPI(title="Study App API", version="1.0.0")
+app = FastAPI(title="Study App API", version="1.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,6 +32,30 @@ class ChapterOut(BaseModel):
     number: int
     title: str
     summary: Optional[str] = None
+
+class TopicOut(BaseModel):
+    id: str
+    chapter_id: str
+    title: str
+    content: Optional[str] = None
+
+class NoteIn(BaseModel):
+    title: str
+    body: str
+
+class NoteOut(NoteIn):
+    id: str
+    chapter_id: str
+
+class MCQOut(BaseModel):
+    id: str
+    chapter_id: str
+    question: str
+    options: List[str]
+    answer_index: int = Field(..., ge=0)
+
+class MCQAnswerIn(BaseModel):
+    answer_index: int = Field(..., ge=0)
 
 # ---------- Seed Data (Maharashtra HSC 12th Commerce) ----------
 SEED_SUBJECTS = [
@@ -88,6 +112,38 @@ SEED_CHAPTERS = {
     ],
 }
 
+SEED_TOPICS = {
+    ("Economics", 1): [
+        {"title": "Definitions of Economics", "content": "Wealth, Welfare, Scarcity, Growth definitions."},
+        {"title": "Micro vs Macro", "content": "Scope and limitations of micro economics."},
+    ],
+    ("Book Keeping & Accountancy", 1): [
+        {"title": "Final Accounts Components", "content": "Trading, P&L Account and Balance Sheet."},
+    ],
+}
+
+SEED_MCQS = {
+    ("Economics", 1): [
+        {
+            "question": "Microeconomics studies _____.",
+            "options": ["Aggregate demand", "Individual units", "National income", "General price level"],
+            "answer_index": 1,
+        },
+        {
+            "question": "Utility is the _____ derived from a commodity.",
+            "options": ["cost", "satisfaction", "production", "income"],
+            "answer_index": 1,
+        },
+    ],
+    ("Book Keeping & Accountancy", 1): [
+        {
+            "question": "Which is prepared to ascertain gross profit?",
+            "options": ["Trading Account", "Balance Sheet", "P&L Appropriation A/c", "Trial Balance"],
+            "answer_index": 0,
+        }
+    ],
+}
+
 # ---------- Helpers ----------
 
 def _id_str(doc):
@@ -96,7 +152,6 @@ def _id_str(doc):
 async def ensure_seed(board: str, standard: str):
     """Ensure seed subjects and chapters exist in DB for given board/standard."""
     try:
-        # Check if subjects exist
         existing = get_documents("subject", {"board": board, "standard": standard})
         names = {s.get("name") for s in existing}
         id_map = {s.get("name"): _id_str(s) for s in existing}
@@ -114,8 +169,29 @@ async def ensure_seed(board: str, standard: str):
             if not existing_ch:
                 for ch in chapters:
                     create_document("chapter", {**ch, "subject_id": sid})
+        # Seed some topics and mcqs for sample chapters
+        for (subj_name, number), topics in SEED_TOPICS.items():
+            sid = id_map.get(subj_name)
+            if not sid:
+                continue
+            chs = get_documents("chapter", {"subject_id": sid, "number": number})
+            if chs:
+                ch_id = _id_str(chs[0])
+                if not get_documents("topic", {"chapter_id": ch_id}):
+                    for t in topics:
+                        create_document("topic", {**t, "chapter_id": ch_id})
+        for (subj_name, number), mcqs in SEED_MCQS.items():
+            sid = id_map.get(subj_name)
+            if not sid:
+                continue
+            chs = get_documents("chapter", {"subject_id": sid, "number": number})
+            if chs:
+                ch_id = _id_str(chs[0])
+                if not get_documents("mcq", {"chapter_id": ch_id}):
+                    for m in mcqs:
+                        create_document("mcq", {**m, "chapter_id": ch_id})
     except Exception:
-        # Database might not be configured; ignore silently to allow API to still work
+        # Database might not be configured; ignore to allow API to still work
         pass
 
 # ---------- Routes ----------
@@ -128,7 +204,6 @@ async def list_subjects(
     board: str = Query("Maharashtra"),
     standard: str = Query("12")
 ):
-    # attempt to seed and then return from DB; fallback to seed constants
     await ensure_seed(board, standard)
     try:
         docs = get_documents("subject", {"board": board, "standard": standard})
@@ -148,13 +223,11 @@ async def list_subjects(
             return subjects
     except Exception:
         pass
-    # Fallback (no DB)
     fallback = [s for s in SEED_SUBJECTS if s["board"] == board and s["standard"] == standard]
     return [SubjectOut(id=str(i), **s) for i, s in enumerate(fallback, start=1)]
 
 @app.get("/api/subjects/{subject_id}/chapters", response_model=List[ChapterOut])
 async def list_chapters(subject_id: str):
-    # Try DB first
     try:
         docs = get_documents("chapter", {"subject_id": subject_id})
         if docs:
@@ -168,8 +241,7 @@ async def list_chapters(subject_id: str):
                 )
                 for d in docs
             ]
-        # If subject_id is a fallback numeric string, map from seed
-        # Find subject name via subjects collection
+        # Map via seed if subject_id is ObjectId-like but not matching
         subs = get_documents("subject", {})
         sub_by_id = { _id_str(s): s.get("name") for s in subs }
         name = sub_by_id.get(subject_id)
@@ -187,7 +259,6 @@ async def list_chapters(subject_id: str):
             ]
     except Exception:
         pass
-    # Pure fallback: subject_id likely from fallback enumeration index -> map name by order
     ordered = [s for s in SEED_SUBJECTS if s["board"] == "Maharashtra" and s["standard"] == "12"]
     try:
         idx = int(subject_id) - 1
@@ -205,6 +276,127 @@ async def list_chapters(subject_id: str):
         ]
     except Exception:
         raise HTTPException(status_code=404, detail="Chapters not found for subject")
+
+# ------- Topics -------
+@app.get("/api/chapters/{chapter_id}/topics", response_model=List[TopicOut])
+async def list_topics(chapter_id: str):
+    # Try DB
+    try:
+        docs = get_documents("topic", {"chapter_id": chapter_id})
+        if docs:
+            return [TopicOut(id=_id_str(d), chapter_id=d.get("chapter_id"), title=d.get("title"), content=d.get("content")) for d in docs]
+        # Fallback via seed: chapter_id pattern "<subjectid>-<number>"
+        subj_id, number = chapter_id.split("-", 1)
+        number = int(number)
+        subs = get_documents("subject", {})
+        sub_by_id = { _id_str(s): s.get("name") for s in subs }
+        subj_name = sub_by_id.get(subj_id)
+        if subj_name:
+            items = SEED_TOPICS.get((subj_name, number), [])
+            return [TopicOut(id=f"{chapter_id}-t{i}", chapter_id=chapter_id, title=t["title"], content=t.get("content")) for i, t in enumerate(items, start=1)]
+    except Exception:
+        pass
+    # Pure seed fallback based on enumeration: subject order -> chapter number
+    try:
+        sid, number = chapter_id.split("-", 1)
+        idx = int(sid) - 1
+        number = int(number)
+        name = [s for s in SEED_SUBJECTS if s["board"] == "Maharashtra" and s["standard"] == "12"][idx]["name"]
+        items = SEED_TOPICS.get((name, number), [])
+        return [TopicOut(id=f"{chapter_id}-t{i}", chapter_id=chapter_id, title=t["title"], content=t.get("content")) for i, t in enumerate(items, start=1)]
+    except Exception:
+        return []
+
+# ------- Notes -------
+@app.get("/api/chapters/{chapter_id}/notes", response_model=List[NoteOut])
+async def list_notes(chapter_id: str):
+    try:
+        docs = get_documents("note", {"chapter_id": chapter_id})
+        return [NoteOut(id=_id_str(d), chapter_id=d.get("chapter_id"), title=d.get("title"), body=d.get("body")) for d in docs]
+    except Exception:
+        # DB required for notes; without DB there are no personal notes
+        return []
+
+@app.post("/api/chapters/{chapter_id}/notes", response_model=NoteOut)
+async def create_note(chapter_id: str, payload: NoteIn):
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not configured. Notes require database.")
+    note_id = create_document("note", {"chapter_id": chapter_id, **payload.model_dump()})
+    return NoteOut(id=note_id, chapter_id=chapter_id, **payload.model_dump())
+
+# ------- MCQs -------
+@app.get("/api/chapters/{chapter_id}/mcqs", response_model=List[MCQOut])
+async def list_mcqs(chapter_id: str):
+    try:
+        docs = get_documents("mcq", {"chapter_id": chapter_id})
+        if docs:
+            return [MCQOut(id=_id_str(d), chapter_id=d.get("chapter_id"), question=d.get("question"), options=d.get("options", []), answer_index=d.get("answer_index", 0)) for d in docs]
+        # Fallback using seed
+        subj_part, number = chapter_id.split("-", 1)
+        number = int(number)
+        subs = get_documents("subject", {})
+        sub_by_id = { _id_str(s): s.get("name") for s in subs }
+        subj_name = sub_by_id.get(subj_part)
+        if subj_name:
+            items = SEED_MCQS.get((subj_name, number), [])
+            return [MCQOut(id=f"{chapter_id}-q{i}", chapter_id=chapter_id, question=m["question"], options=m.get("options", []), answer_index=m.get("answer_index", 0)) for i, m in enumerate(items, start=1)]
+    except Exception:
+        pass
+    # Pure fallback based on subject enumeration index in seed
+    try:
+        sid, number = chapter_id.split("-", 1)
+        idx = int(sid) - 1
+        number = int(number)
+        name = [s for s in SEED_SUBJECTS if s["board"] == "Maharashtra" and s["standard"] == "12"][idx]["name"]
+        items = SEED_MCQS.get((name, number), [])
+        return [MCQOut(id=f"{chapter_id}-q{i}", chapter_id=chapter_id, question=m["question"], options=m.get("options", []), answer_index=m.get("answer_index", 0)) for i, m in enumerate(items, start=1)]
+    except Exception:
+        return []
+
+@app.post("/api/chapters/{chapter_id}/mcqs", response_model=MCQOut)
+async def create_mcq(chapter_id: str, payload: MCQOut):
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not configured. Creating MCQs requires database.")
+    data = payload.model_dump()
+    data.pop("id", None)
+    data["chapter_id"] = chapter_id
+    mcq_id = create_document("mcq", data)
+    return MCQOut(id=mcq_id, **data)
+
+@app.post("/api/chapters/{chapter_id}/mcqs/{mcq_id}/check")
+async def check_mcq_answer(chapter_id: str, mcq_id: str, answer: MCQAnswerIn = Body(...)):
+    # If DB exists, try to fetch; otherwise, infer from id format in seed
+    try:
+        docs = get_documents("mcq", {"_id": mcq_id})
+        if docs:
+            correct = int(docs[0].get("answer_index", 0))
+            return {"correct": answer.answer_index == correct}
+    except Exception:
+        pass
+    # Seed id format: <chapter_id>-qN
+    if mcq_id.startswith(f"{chapter_id}-q"):
+        try:
+            n = int(mcq_id.split("-q")[-1]) - 1
+            # Map to seed
+            try:
+                subj_part, number = chapter_id.split("-", 1)
+                idx = int(subj_part) - 1
+                number = int(number)
+                subj_name = [s for s in SEED_SUBJECTS if s["board"] == "Maharashtra" and s["standard"] == "12"][idx]["name"]
+                correct = SEED_MCQS[(subj_name, number)][n]["answer_index"]
+            except Exception:
+                # try resolve via subjects collection
+                try:
+                    subs = get_documents("subject", {})
+                    sub_by_id = { _id_str(s): s.get("name") for s in subs }
+                    subj_name = sub_by_id.get(subj_part)
+                    correct = SEED_MCQS[(subj_name, int(number))][n]["answer_index"]
+                except Exception:
+                    return {"correct": False}
+            return {"correct": answer.answer_index == correct}
+        except Exception:
+            return {"correct": False}
+    return {"correct": False}
 
 @app.get("/test")
 def test_database():
