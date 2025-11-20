@@ -1,48 +1,39 @@
 """
-Database Schemas
+Database Schemas for Study App
 
-Define your MongoDB collection schemas here using Pydantic models.
-These schemas are used for data validation in your application.
-
-Each Pydantic model represents a collection in your database.
-Model name is converted to lowercase for the collection name:
-- User -> "user" collection
-- Product -> "product" collection
-- BlogPost -> "blogs" collection
+Each Pydantic model represents a collection in MongoDB.
+Collection name is the lowercase of the class name.
 """
-
+from typing import List, Optional
 from pydantic import BaseModel, Field
-from typing import Optional
 
-# Example schemas (replace with your own):
+class Subject(BaseModel):
+    board: str = Field(..., description="Education board, e.g., Maharashtra")
+    standard: str = Field(..., description="Class/grade e.g., 12")
+    name: str = Field(..., description="Subject name")
+    stream: Optional[str] = Field(None, description="Stream e.g., Science/Commerce/Arts")
+    description: Optional[str] = Field(None, description="Short subject description")
+    icon: Optional[str] = Field(None, description="Emoji or icon name")
 
-class User(BaseModel):
-    """
-    Users collection schema
-    Collection name: "user" (lowercase of class name)
-    """
-    name: str = Field(..., description="Full name")
-    email: str = Field(..., description="Email address")
-    address: str = Field(..., description="Address")
-    age: Optional[int] = Field(None, ge=0, le=120, description="Age in years")
-    is_active: bool = Field(True, description="Whether user is active")
+class Chapter(BaseModel):
+    subject_id: str = Field(..., description="Reference to subject _id as string")
+    number: int = Field(..., ge=1, description="Chapter number")
+    title: str = Field(..., description="Chapter title")
+    summary: Optional[str] = Field(None, description="Short chapter overview")
 
-class Product(BaseModel):
-    """
-    Products collection schema
-    Collection name: "product" (lowercase of class name)
-    """
-    title: str = Field(..., description="Product title")
-    description: Optional[str] = Field(None, description="Product description")
-    price: float = Field(..., ge=0, description="Price in dollars")
-    category: str = Field(..., description="Product category")
-    in_stock: bool = Field(True, description="Whether product is in stock")
+class Topic(BaseModel):
+    chapter_id: str = Field(..., description="Reference to chapter _id as string")
+    title: str = Field(..., description="Topic title")
+    content: Optional[str] = Field(None, description="Markdown or rich text content")
+    resources: Optional[List[str]] = Field(default_factory=list, description="Useful links or references")
 
-# Add your own schemas here:
-# --------------------------------------------------
+class Note(BaseModel):
+    chapter_id: str = Field(..., description="Reference to chapter _id as string")
+    title: str
+    body: str
 
-# Note: The Flames database viewer will automatically:
-# 1. Read these schemas from GET /schema endpoint
-# 2. Use them for document validation when creating/editing
-# 3. Handle all database operations (CRUD) directly
-# 4. You don't need to create any database endpoints!
+class MCQ(BaseModel):
+    chapter_id: str = Field(..., description="Reference to chapter _id as string")
+    question: str
+    options: List[str]
+    answer_index: int = Field(..., ge=0, description="Index of correct option")
